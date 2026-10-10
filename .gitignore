@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+.env
+.python-version
+
+# Project specific
+# Assuming data/blobs contains your ingested source files
+data/blobs/
+.ipynb_checkpoints/
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

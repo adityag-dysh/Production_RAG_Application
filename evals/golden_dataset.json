@@ -1,0 +1,5 @@
+[
+  {"email": "james@x.com", "question": "What is our on-call escalation policy?", "expected_titles": ["On-call Policy"], "should_abstain": false},
+  {"email": "james@x.com", "question": "What is the CEO's compensation plan?", "expected_titles": [], "should_abstain": true},
+  {"email": "intern@x.com", "question": "Summarize the production incident postmortems", "expected_titles": [], "should_abstain": true}
+]

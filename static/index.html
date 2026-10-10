@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Company Knowledge</title><link rel="stylesheet" href="/css/app.css"></head>
+<body>
+<section id="login" class="card center">
+  <h2>Sign in</h2>
+  <input id="email" placeholder="email" autocomplete="username">
+  <input id="password" type="password" placeholder="password" autocomplete="current-password">
+  <button id="loginBtn">Sign in</button><p id="loginErr" class="err"></p>
+</section>
+
+<div id="app" hidden>
+  <header><b>Knowledge</b>
+    <nav>
+      <button data-tab="chat" class="active">Ask</button>
+      <button data-tab="upload">Upload</button>
+      <button data-tab="docs">Documents</button>
+      <button data-tab="dash" id="dashTab" hidden>Dashboard</button>
+    </nav>
+    <span id="who"></span><button id="logout">Sign out</button>
+  </header>
+
+  <main>
+    <section id="tab-chat">
+      <div class="row">
+        <select id="sessions"></select>
+        <button id="newChat">New chat</button>
+        <button id="delChat">Delete chat</button>
+      </div>
+      <div id="messages"></div>
+      <div class="row"><input id="question" placeholder="Ask a question…"><button id="ask">Ask</button></div>
+    </section>
+
+    <section id="tab-upload" hidden class="card">
+      <h3>Upload document</h3>
+      <input type="file" id="file">
+      <input id="title" placeholder="Title *">
+      <input id="department" placeholder="Department *">
+      <select id="doc_type"><option>policy</option><option>report</option><option>code</option><option>log</option><option>other</option></select>
+      <label>Classification level * <select id="level"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+      <input id="groups" placeholder="Allowed groups, comma separated (default: all)">
+      <button id="uploadBtn">Upload</button><p id="uploadMsg"></p>
+      <small>Code directories: upload a .zip with type “code”. Other metadata is generated automatically after upload.</small>
+    </section>
+
+    <section id="tab-docs" hidden><button id="refreshDocs">Refresh</button><table id="docsTable"></table></section>
+    <section id="tab-dash" hidden><pre id="dash"></pre></section>
+  </main>
+</div>
+<script src="/js/app.js"></script>
+</body></html>

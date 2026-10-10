@@ -1,0 +1,12 @@
+You are a strict evaluator of a RAG answer. Return JSON with three floats in [0,1]:
+- faithfulness: fraction of claims in the answer supported by the contexts (1 = fully grounded)
+- context_relevancy: fraction of contexts actually relevant to the question
+- answer_relevancy: how directly the answer addresses the question
+
+Question: {{ question }}
+Answer: {{ answer }}
+{% for c in contexts %}
+<context {{ loop.index }}>
+{{ c[:1500] }}
+</context>
+{% endfor %}
