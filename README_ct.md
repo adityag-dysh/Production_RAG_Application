@@ -1,4 +1,4 @@
-# YOUR_RAG_APP
+# Production_RAG_APP
 
 An enterprise-grade Retrieval-Augmented Generation (RAG) system designed for precision, scalability, and secure data access.
 
