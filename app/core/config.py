@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     rate_limit_query_per_min: int = 20
     rate_limit_login_per_min: int = 10
 
+    rate_limit_password_per_min: int = 5
+    focus_max_chars: int = 14000      # max document text loaded for "summarize this doc"
+
 
 @lru_cache
 def get_settings() -> Settings:

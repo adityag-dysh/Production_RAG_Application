@@ -1,7 +1,6 @@
 "use strict";
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
-// Safe wiring: a missing element logs a warning instead of crashing the whole script.
 const on = (id, evt, fn) => { const e = $(id); if (e) e[evt] = fn; else console.warn(`app.js: missing #${id}`); };
 const el = (tag, text, cls) => {
   const e = document.createElement(tag);
@@ -36,7 +35,7 @@ async function api(path, opts = {}) {
   return r;
 }
 
-const jsonPost = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const jsonBody = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 /* ---------- auth ---------- */
 async function login() {
@@ -63,22 +62,26 @@ function logout() {
   location.reload();   // wipes chat, tables, dashboard and upload status so nothing leaks to the next user
 }
 
+function renderWho() { $("who").textContent = `${me.name || me.email} · ${me.role} · L${me.clearance_level}`; }
+
 async function showApp() {
   if (!me) { try { me = await (await api("/auth/me")).json(); } catch { return; } }
   $("login").hidden = true;
   $("app").hidden = false;
-  $("who").textContent = `${me.email} · ${me.role} · L${me.clearance_level}`;
+  renderWho();
   if ($("dashTab")) $("dashTab").hidden = !me.is_admin;
+  if ($("usersTab")) $("usersTab").hidden = !(me.role === "ceo" || me.role === "hr" || me.is_admin);
   await loadSessions();
 }
 
 /* ---------- tabs ---------- */
 function showTab(name) {
   document.querySelectorAll("nav button[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["chat", "upload", "docs", "dash"].forEach((t) => { const s = $("tab-" + t); if (s) s.hidden = t !== name; });
+  ["chat", "upload", "docs", "users", "profile", "dash"].forEach((t) => { const s = $("tab-" + t); if (s) s.hidden = t !== name; });
   clearTimeout(docsTimer);
   if (name === "docs") loadDocs();
   if (name === "dash") loadDash();
+  if (name === "profile") fillProfile();
 }
 
 /* ---------- chat ---------- */
@@ -91,26 +94,98 @@ function newBox() {
   return { text, src, meta };
 }
 
+/* ---------- source inspector drawer ---------- */
+let currentSourcesMap = {};
+
+function openSourceDrawer(sourceInfo) {
+  const drawer = $("sourceDrawer");
+  const content = $("drawerContent");
+  if (!drawer || !content) return;
+
+  content.replaceChildren();
+  content.append(el("h4", sourceInfo.title));
+  
+  const metaBox = el("div", null, "meta");
+  metaBox.style.marginBottom = "12px";
+  metaBox.textContent = `Type: ${sourceInfo.doc_type || "file"} · Department: ${sourceInfo.department || "—"} · Classification L${sourceInfo.classification_level ?? 0}`;
+  content.append(metaBox);
+
+  if (sourceInfo.summary) {
+    content.append(el("strong", "Summary:"));
+    content.append(el("p", sourceInfo.summary));
+  }
+
+  content.append(el("strong", "Matching Passages:"));
+  if (sourceInfo.passages && sourceInfo.passages.length > 0) {
+    sourceInfo.passages.forEach((p) => {
+      const pBox = el("div", null, "card");
+      pBox.style.margin = "8px 0"; pBox.style.padding = "10px"; pBox.style.background = "rgba(128,128,128,0.05)";
+      pBox.append(el("small", `Passage [${p.n}] — Location: ${p.location || "—"}`, "mut"));
+      pBox.append(el("p", p.text));
+      content.append(pBox);
+    });
+  } else {
+    content.append(el("p", "No detailed passages available.", "mut"));
+  }
+
+  drawer.style.right = "0";
+}
+
+function closeSourceDrawer() {
+  const drawer = $("sourceDrawer");
+  if (drawer) drawer.style.right = "-420px";
+}
+
 function renderSources(host, sources) {
   host.replaceChildren();
   if (!sources || !sources.length) return;
+  currentSourcesMap = {};
+  sources.forEach((s) => {
+    (s.passages || []).forEach((p) => {
+      currentSourcesMap[p.n] = s;
+    });
+  });
+
   const d = el("details", null, "sources");
   d.append(el("summary", `Sources (${sources.length} file${sources.length > 1 ? "s" : ""})`));
   sources.forEach((s) => {
     const item = el("div", null, "src");
+    item.style.cursor = "pointer";
+    item.onclick = () => openSourceDrawer(s);
     item.append(el("strong", s.title), el("span", ` · ${s.doc_type || "file"}`, "mut"));
     item.append(el("p", s.summary || "No summary available."));
-    item.append(el("small", (s.passages || []).map((p) => `[${p.n}] ${p.location || "—"} (${p.score})`).join("  ·  "), "mut"));
+    item.append(el("small", (s.passages || []).map((p) => `[${p.n}] ${p.location || "—"}`).join("  ·  "), "mut"));
     d.append(item);
   });
   host.append(d);
+}
+
+function attachCitationClicks(container) {
+  container.querySelectorAll(".cite-badge").forEach((badge) => {
+    badge.onclick = (e) => {
+      e.preventDefault();
+      const n = badge.dataset.n;
+      const src = currentSourcesMap[n];
+      if (src) {
+        openSourceDrawer(src);
+      }
+    };
+  });
+}
+
+function postProcessMarkdown(textElem, rawText) {
+  let html = marked.parse(rawText);
+  // Transform citation brackets like [1], [2] into clickable interactive badges
+  html = html.replace(/\[(\d+)\]/g, '<span class="cite-badge" data-n="$1">[$1]</span>');
+  textElem.innerHTML = html;
+  attachCitationClicks(textElem);
 }
 
 function addFeedback(meta, logId) {
   [["👍", 1], ["👎", -1]].forEach(([label, v]) => {
     const b = el("button", label);
     b.onclick = async () => {
-      try { await api("/rag/feedback", jsonPost({ log_id: logId, rating: v })); b.disabled = true; }
+      try { await api("/rag/feedback", jsonBody("POST", { log_id: logId, rating: v })); b.disabled = true; }
       catch (e) { meta.append(" ", el("span", e.message, "err")); }
     };
     meta.append(" ", b);
@@ -124,7 +199,7 @@ async function ask() {
   $("messages").append(el("div", q, "msg q"));
   const { text, src, meta } = newBox();
   try {
-    const r = await api("/rag/query", { ...jsonPost({ question: q, session_id: sessionId }), stream: true });
+    const r = await api("/rag/query", { ...jsonBody("POST", { question: q, session_id: sessionId }), stream: true });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       text.textContent = errMsg(j, r);   // includes the 429 "Try again in Ns" message
@@ -143,10 +218,14 @@ async function ask() {
         let data = null;
         try { data = JSON.parse(/data: (.*)/s.exec(raw)?.[1] ?? "null"); } catch { continue; }
         if (ev === "session") sessionId = data;
-        else if (ev === "token") text.textContent += data;
+        else if (ev === "token") {
+          text._raw = (text._raw || "") + data;
+          postProcessMarkdown(text, text._raw);
+        }
         else if (ev === "sources") renderSources(src, data);
         else if (ev === "done") {
-          meta.textContent = `confidence ${data.confidence} · ${data.latency_ms} ms${data.rewritten_query ? " · query rewritten" : ""}`;
+          const label = data.mode === "document_focus" ? "from the previous document" : `confidence ${data.confidence}`;
+          meta.textContent = `${label} · ${data.latency_ms} ms${data.rewritten_query ? " · query rewritten" : ""}`;
           addFeedback(meta, data.log_id);
           loadSessions();
         } else if (ev === "error") text.textContent = data;
@@ -179,7 +258,7 @@ async function openSession(id) {
     const msgs = await (await api(`/rag/sessions/${id}/messages`)).json();
     msgs.forEach((m) => {
       if (m.role === "user") $("messages").append(el("div", m.content, "msg q"));
-      else { const b = newBox(); b.text.textContent = m.content; renderSources(b.src, m.sources); }
+      else { const b = newBox(); postProcessMarkdown(b.text, m.content); renderSources(b.src, m.sources); }
     });
   } catch (e) { $("messages").append(el("div", e.message, "msg")); }
 }
@@ -192,25 +271,145 @@ async function deleteSession() {
   loadSessions();
 }
 
-/* ---------- upload ---------- */
-async function upload() {
-  const f = $("file").files[0];
-  const msg = $("uploadMsg");
-  if (!f || !$("title").value.trim() || !$("department").value.trim()) {
-    msg.textContent = "File, title and department are required"; return;
-  }
-  const fd = new FormData();
-  fd.append("file", f);
-  fd.append("title", $("title").value.trim());
-  fd.append("department", $("department").value.trim());
-  fd.append("doc_type", $("doc_type").value);
-  fd.append("classification_level", $("level").value);
-  fd.append("allowed_groups", $("groups").value.trim() || "all");
-  msg.textContent = "Uploading…";
+/* ---------- profile ---------- */
+function setMsg(id, text, ok) { const m = $(id); m.textContent = text; m.className = ok ? "ok" : "err"; }
+
+function fillProfile() {
+  $("profInfo").textContent = `${me.email} · ${me.role} · clearance L${me.clearance_level} · groups: ${(me.groups || []).join(", ") || "—"}`;
+  $("profName").value = me.name || "";
+  ["nameMsg", "pwMsg"].forEach((id) => setMsg(id, "", true));
+}
+
+async function saveName() {
+  const name = $("profName").value.trim();
+  if (!name) { setMsg("nameMsg", "Name cannot be empty", false); return; }
   try {
-    const j = await (await api("/etl/upload", { method: "POST", body: fd })).json();
-    msg.textContent = `Queued (${j.doc_id}). Status: ${j.status}. Check the Documents tab.`;
-  } catch (e) { msg.textContent = "Error: " + e.message; }
+    me = await (await api("/auth/me", jsonBody("PATCH", { name }))).json();
+    renderWho(); setMsg("nameMsg", "Name updated", true);
+  } catch (e) { setMsg("nameMsg", e.message, false); }
+}
+
+async function changePassword() {
+  const cur = $("curPw").value, nw = $("newPw").value, nw2 = $("newPw2").value;
+  if (nw !== nw2) { setMsg("pwMsg", "New passwords do not match", false); return; }
+  if (nw.length < 8) { setMsg("pwMsg", "New password must be at least 8 characters", false); return; }
+  try {
+    const j = await (await api("/auth/change-password", jsonBody("POST", { current_password: cur, new_password: nw }))).json();
+    token = j.access_token; sessionStorage.setItem("token", token);   // old token is now invalid
+    ["curPw", "newPw", "newPw2"].forEach((id) => { $(id).value = ""; });
+    setMsg("pwMsg", "Password changed. Other devices have been signed out.", true);
+  } catch (e) { setMsg("pwMsg", e.message, false); }
+}
+
+/* ---------- upload ---------- */
+let uploadQueueFiles = [];
+
+function setupDropZone() {
+  const dropZone = $("dropZone");
+  const fileInput = $("file");
+  const browseBtn = $("browseBtn");
+  if (!dropZone || !fileInput || !browseBtn) return;
+
+  browseBtn.onclick = (e) => { e.preventDefault(); fileInput.click(); };
+  dropZone.onclick = () => fileInput.click();
+
+  fileInput.onchange = (e) => {
+    addFilesToQueue(e.target.files);
+    fileInput.value = "";
+  };
+
+  ["dragenter", "dragover"].forEach((eventName) => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropZone.style.borderColor = "var(--acc)";
+      dropZone.style.background = "rgba(47, 95, 234, 0.05)";
+    }, false);
+  });
+
+  ["dragleave", "drop"].forEach((eventName) => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropZone.style.borderColor = "#8886";
+      dropZone.style.background = "transparent";
+      if (eventName === "drop" && e.dataTransfer.files) {
+        addFilesToQueue(e.dataTransfer.files);
+      }
+    }, false);
+  });
+}
+
+function addFilesToQueue(files) {
+  for (const f of files) {
+    uploadQueueFiles.push({ file: f, status: "pending", error: null });
+  }
+  renderUploadQueue();
+}
+
+function renderUploadQueue() {
+  const qContainer = $("uploadQueue");
+  if (!qContainer) return;
+  qContainer.replaceChildren();
+  if (uploadQueueFiles.length === 0) return;
+
+  uploadQueueFiles.forEach((item, idx) => {
+    const row = el("div", null, "src");
+    row.style.display = "flex"; row.style.justifyContent = "space-between"; row.style.alignItems = "center";
+    const info = el("div");
+    info.append(el("strong", item.file.name), el("span", ` (${Math.round(item.file.size / 1024)} KB) · `, "mut"), el("small", item.status, item.status === "error" ? "err" : "mut"));
+    if (item.error) {
+      info.append(el("br"), el("small", item.error, "err"));
+    }
+    row.append(info);
+    if (item.status === "pending") {
+      const rm = el("button", "Remove");
+      rm.style.padding = "2px 6px"; rm.style.fontSize = "12px";
+      rm.onclick = () => { uploadQueueFiles.splice(idx, 1); renderUploadQueue(); };
+      row.append(rm);
+    }
+    qContainer.append(row);
+  });
+}
+
+async function upload() {
+  const msg = $("uploadMsg");
+  const dept = $("department").value.trim();
+  if (uploadQueueFiles.length === 0 || !dept) {
+    msg.textContent = "Please select at least one file and provide a department"; return;
+  }
+
+  msg.textContent = `Uploading queue (0 / ${uploadQueueFiles.length})…`;
+  let successCount = 0;
+
+  for (let i = 0; i < uploadQueueFiles.length; i++) {
+    const item = uploadQueueFiles[i];
+    if (item.status === "success") { successCount++; continue; }
+    item.status = "uploading";
+    renderUploadQueue();
+
+    const fd = new FormData();
+    fd.append("file", item.file);
+    fd.append("title", item.file.name);
+    fd.append("department", dept);
+    fd.append("doc_type", $("doc_type").value);
+    fd.append("classification_level", $("level").value);
+    fd.append("allowed_groups", $("groups").value.trim() || "all");
+
+    try {
+      const r = await api("/etl/upload", { method: "POST", body: fd });
+      const j = await r.json();
+      item.status = "success";
+      successCount++;
+    } catch (e) {
+      item.status = "error";
+      item.error = e.message;
+    }
+    renderUploadQueue();
+    msg.textContent = `Processing queue (${successCount} / ${uploadQueueFiles.length})…`;
+  }
+
+  msg.textContent = `Queue complete! Successfully uploaded ${successCount} file(s). Check the Documents tab.`;
+  uploadQueueFiles = uploadQueueFiles.filter(i => i.status !== "success");
+  renderUploadQueue();
 }
 
 /* ---------- documents ---------- */
@@ -231,9 +430,40 @@ async function loadDocs() {
       .forEach((x) => r.append(el("td", String(x))));
     t.append(r);
   });
-  // auto-refresh while something is still being indexed
   if (!$("tab-docs").hidden && docs.some((d) => d.status === "pending" || d.status === "processing")) {
-    docsTimer = setTimeout(loadDocs, 5000);
+    docsTimer = setTimeout(loadDocs, 5000);   // auto-refresh while something is still indexing
+  }
+}
+
+async function createUser() {
+  const email = $("newUserEmail").value.trim();
+  const name = $("newUserName").value.trim();
+  const role = $("newUserRole").value.trim();
+  const password = $("newUserPw").value;
+  const clearance_level = parseInt($("newUserLevel").value, 10);
+  const groups = $("newUserGroups").value.split(",").map(s => s.trim()).filter(Boolean);
+  const can_upload = $("newUserUpload").checked;
+  const is_admin = $("newUserAdmin").checked;
+
+  if (!email || !name || !role || !password) {
+    setMsg("userMsg", "Email, Name, Role and Password are required", false);
+    return;
+  }
+
+  try {
+    await api("/auth/users", jsonBody("POST", {
+      email, name, role, password, clearance_level, groups, can_upload, is_admin
+    }));
+    setMsg("userMsg", `User ${email} created successfully!`, true);
+    $("newUserEmail").value = "";
+    $("newUserName").value = "";
+    $("newUserRole").value = "";
+    $("newUserPw").value = "";
+    $("newUserGroups").value = "";
+    $("newUserUpload").checked = false;
+    $("newUserAdmin").checked = false;
+  } catch (e) {
+    setMsg("userMsg", e.message, false);
   }
 }
 
@@ -255,5 +485,10 @@ on("refreshDocs", "onclick", loadDocs);
 on("sessions", "onchange", () => openSession($("sessions").value));
 on("newChat", "onclick", () => { openSession(null); const s = $("sessions"); if (s) s.value = ""; });
 on("delChat", "onclick", deleteSession);
+on("saveName", "onclick", saveName);
+on("changePw", "onclick", changePassword);
+on("createUserBtn", "onclick", createUser);
+on("closeDrawer", "onclick", closeSourceDrawer);
+setupDropZone();
 
 if (token) showApp();

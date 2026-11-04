@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Company Knowledge</title><link rel="stylesheet" href="/css/app.css"></head>
+<title>Company Knowledge</title><link rel="stylesheet" href="/css/app.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
 <body>
 <section id="login" class="card center">
   <h2>Sign in</h2>
@@ -15,6 +17,8 @@
       <button data-tab="chat" class="active">Ask</button>
       <button data-tab="upload">Upload</button>
       <button data-tab="docs">Documents</button>
+      <button data-tab="users" id="usersTab" hidden>Users</button>
+      <button data-tab="profile">Profile</button>
       <button data-tab="dash" id="dashTab" hidden>Dashboard</button>
     </nav>
     <span id="who"></span><button id="logout">Sign out</button>
@@ -32,20 +36,70 @@
     </section>
 
     <section id="tab-upload" hidden class="card">
-      <h3>Upload document</h3>
-      <input type="file" id="file">
-      <input id="title" placeholder="Title *">
+      <h3>Upload documents</h3>
+      <div id="dropZone" style="border: 2px dashed #8886; border-radius: 8px; padding: 24px; text-align: center; margin-bottom: 12px; cursor: pointer;">
+        <p style="margin: 0 0 8px 0; color: var(--mut);">Drag & drop files here, or click to browse</p>
+        <input type="file" id="file" multiple style="display: none;">
+        <button type="button" id="browseBtn" style="background: var(--card); color: var(--acc); border: 1px solid var(--acc);">Select Files</button>
+      </div>
       <input id="department" placeholder="Department *">
       <select id="doc_type"><option>policy</option><option>report</option><option>code</option><option>log</option><option>other</option></select>
       <label>Classification level * <select id="level"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
       <input id="groups" placeholder="Allowed groups, comma separated (default: all)">
-      <button id="uploadBtn">Upload</button><p id="uploadMsg"></p>
-      <small>Code directories: upload a .zip with type “code”. Other metadata is generated automatically after upload.</small>
+      <button id="uploadBtn">Upload Queue</button>
+      <div id="uploadQueue" style="margin-top: 12px; max-height: 200px; overflow-y: auto;"></div>
+      <p id="uploadMsg"></p>
+      <small>Code directories: upload a .zip with type “code”. Titles are automatically assigned from filenames.</small>
     </section>
 
     <section id="tab-docs" hidden><button id="refreshDocs">Refresh</button><table id="docsTable"></table></section>
+
+    <section id="tab-users" hidden class="card">
+      <h3>User Management</h3>
+      <p class="mut">Create and manage users in your organization (HR and CEO only).</p>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
+        <input id="newUserEmail" placeholder="Email *">
+        <input id="newUserName" placeholder="Full Name *">
+        <input id="newUserRole" placeholder="Role (e.g. engineer, hr) *">
+        <input id="newUserPw" type="password" placeholder="Password (min 8 chars) *">
+        <label>Clearance Level (0-4) <select id="newUserLevel"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+        <input id="newUserGroups" placeholder="Groups, comma-separated">
+      </div>
+      <div style="display:flex; gap: 12px; margin-bottom: 16px;">
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="newUserUpload" style="width:auto; margin:0;"> Can Upload</label>
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="newUserAdmin" style="width:auto; margin:0;"> Is Admin</label>
+      </div>
+      <button id="createUserBtn">Create User</button>
+      <p id="userMsg"></p>
+    </section>
+
+    <section id="tab-profile" hidden class="card">
+      <h3>My profile</h3>
+      <p class="mut" id="profInfo"></p>
+      <label>Name <input id="profName" maxlength="80"></label>
+      <button id="saveName">Save name</button><p id="nameMsg"></p>
+      <hr>
+      <h3>Change password</h3>
+      <input id="curPw" type="password" placeholder="Current password" autocomplete="current-password">
+      <input id="newPw" type="password" placeholder="New password (min 8 characters)" autocomplete="new-password">
+      <input id="newPw2" type="password" placeholder="Confirm new password" autocomplete="new-password">
+      <button id="changePw">Change password</button><p id="pwMsg"></p>
+      <small>Only the first 70 bytes of a password are used. Changing it signs you out on other devices.</small>
+    </section>
+
     <section id="tab-dash" hidden><pre id="dash"></pre></section>
   </main>
+</div>
+
+<!-- Source Inspector Drawer -->
+<div id="sourceDrawer" style="position: fixed; top: 0; right: -420px; width: 400px; height: 100%; background: var(--card); box-shadow: -4px 0 16px rgba(0,0,0,0.15); transition: right 0.3s ease; z-index: 1000; display: flex; flex-direction: column; padding: 20px; border-left: 1px solid #8883;">
+  <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #8883; padding-bottom: 12px; margin-bottom: 16px;">
+    <h3 style="margin: 0;">Source Inspector</h3>
+    <button id="closeDrawer" style="background: transparent; color: var(--fg); font-size: 18px; padding: 4px 8px;">✕</button>
+  </div>
+  <div id="drawerContent" style="flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.5;">
+    <p class="mut">Click on a source citation or passage to inspect its exact contents.</p>
+  </div>
 </div>
 <script src="/js/app.js"></script>
 </body></html>

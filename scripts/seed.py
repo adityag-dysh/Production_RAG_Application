@@ -19,6 +19,7 @@ async def main():
     await mdb.ensure_indexes()
     for email, org, role, lvl, groups, up, admin in USERS:
         await mdb.col("users").update_one({"_id": email}, {"$set": {
+            "name": email.split("@")[0].title(),
             "email": email, "org_id": org, "role": role, "clearance_level": lvl, "groups": groups,
             "can_upload": up, "is_admin": admin, "active": True, "password_hash": hash_password(PW)}}, upsert=True)
         print("seeded", email, org, role, lvl)

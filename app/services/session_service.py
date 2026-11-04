@@ -1,5 +1,7 @@
 """Conversation memory. Sessions are private to (org_id, user_id): every read/write re-checks both.
-History is re-validated against CURRENT document access before it is shown or sent to the model."""
+History is re-validated against CURRENT document access before it is shown or sent to the model.
+Assistant turns remember which documents they used (doc_ids + titles) so 'this doc' can be resolved."""
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +9,8 @@ from app.core.acl import mongo_acl_filter
 from app.core.config import settings
 from app.core.exceptions import NotFound
 from app.services import mongodb_service as mdb
+
+_CITE = re.compile(r"\s*\[\d+\]")  # strip [1][2] markers so they can't be confused with new passage numbers
 
 
 def _now() -> datetime:
@@ -42,14 +46,10 @@ async def add_message(user, sid: str, role: str, content: str,
 
 async def _filter_visible(user, msgs: list[dict]) -> list[dict]:
     """Drop assistant turns grounded in documents the user can no longer access (or that were deleted),
-    together with the question that produced them."""
+    together with the question that produced them. NOTE: documents use 'classification_level'."""
     ids = {d for m in msgs for d in m.get("doc_ids", [])}
     ok: set[str] = set()
     if ids:
-        # rows = await mdb.col("documents").find(
-        #     {"_id": {"$in": list(ids)}, **mongo_acl_filter(user.org_id, user.clearance_level, user.groups)},
-        #     {"_id": 1}).to_list(None)
-
         rows = await mdb.col("documents").find(
             {"_id": {"$in": list(ids)},
              **mongo_acl_filter(user.org_id, user.clearance_level, user.groups,
@@ -67,14 +67,17 @@ async def _filter_visible(user, msgs: list[dict]) -> list[dict]:
 
 
 async def load_history(user, sid: str) -> list[dict]:
-    """Last N messages for the prompt, as [{'role','content'}]."""
+    """Last N messages for the prompt: [{'role','content','doc_ids','titles'}]."""
     rows = await mdb.col("messages").find(
         {"session_id": sid, "org_id": user.org_id, "user_id": user.user_id}
     ).sort("_id", -1).limit(settings.history_turns).to_list(None)
     msgs = await _filter_visible(user, list(reversed(rows)))
     while msgs and msgs[0]["role"] == "assistant":  # window cut a pair in half
         msgs.pop(0)
-    return [{"role": m["role"], "content": m["content"][: settings.history_max_chars]} for m in msgs]
+    return [{"role": m["role"],
+             "content": _CITE.sub("", m["content"])[: settings.history_max_chars],
+             "doc_ids": m.get("doc_ids", []),
+             "titles": [s.get("title", "") for s in m.get("sources", [])]} for m in msgs]
 
 
 async def list_sessions(user) -> list[dict]:

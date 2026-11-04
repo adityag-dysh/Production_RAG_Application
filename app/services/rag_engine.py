@@ -1,13 +1,15 @@
 """Lean CRAG + session memory.
- conf >= HI : answer.   LO <= conf < HI : one cheap LLM grade.   Fails / < LO : rewrite ONCE, retry, else abstain.
-History only (a) turns follow-ups into standalone questions and (b) gives conversational context.
-Every turn still retrieves fresh through the ACL; facts must come from the passages."""
+ Normal question : retrieve -> rerank -> gate (answer / grade / rewrite once / abstain).
+ 'This doc' follow-up : the previous answer's document(s) are loaded directly (ACL re-checked), no search.
+History (a) turns follow-ups into standalone questions, (b) provides conversational context.
+Facts must come from the passages, never from the history."""
 import asyncio
 import logging
 import time
 import uuid
 
 from app.api.v1.schemas.RAG_schemas import Citation, GradeResult
+from app.core.acl import acl_allows
 from app.core.config import settings
 from app.core.logging import trace_id_var
 from app.services import (audit_service, gemini_service, mongodb_service as mdb,
@@ -47,35 +49,62 @@ async def _rewrite(question: str) -> str:
 
 
 @obs.traceable(name="rag.condense")
-async def _condense(question: str, history: list[dict]) -> str:
-    if not history:  # first turn: no extra LLM call
-        return question
+async def _condense(question: str, history: list[dict]) -> tuple[str, bool]:
+    """Returns (standalone_question, refers_to_previous_document). No LLM call on the first turn."""
+    if not history:
+        return question, False
     try:
-        out = await gemini_service.generate_text(
+        r = await gemini_service.generate_json(
             template_manager.render("condense_question.j2", question=question, history=history))
-        return out.strip()[:500] or question
+        standalone = str(r.get("standalone") or question).strip()[:500] or question
+        return standalone, bool(r.get("refers_to_previous_document"))
     except Exception:
         log.exception("condense_failed")
-        return question
+        return question, False
+
+
+async def _focus_chunks(user, doc_ids: list[str]) -> list[dict]:
+    """Chunks of the previously used document(s), in reading order, up to focus_max_chars.
+    Every chunk is re-checked against CURRENT access, so a tightened document is never shown."""
+    rows = await mdb.col("chunks").find(
+        {"doc_id": {"$in": doc_ids[:3]}, "org_id": user.org_id}).limit(500).to_list(None)
+    rows = [r for r in rows if acl_allows(user.clearance_level, user.groups,
+                                          r["clearance_level"], r["allowed_groups"])]
+
+    def order(r):  # chunk ids look like "<doc_id>:<n>"; sort numerically, not as text
+        try:
+            return r["doc_id"], int(r["_id"].rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            return r["doc_id"], 0
+
+    out, used = [], 0
+    for r in sorted(rows, key=order):
+        if used + len(r["text"]) > settings.focus_max_chars:
+            break
+        out.append({"chunk_id": r["_id"], "doc_id": r["doc_id"], "title": r["title"], "text": r["text"],
+                    "location": r.get("location", ""), "confidence": 1.0})
+        used += len(r["text"])
+    return out
 
 
 async def _sources(user, ctx: list[dict], cites: list[Citation]) -> list[dict]:
-    """One entry per FILE (several chunks of the same file are grouped), with its short summary.
-    Summaries are document-level; ACL is document-level too, so showing them leaks nothing."""
+    """One entry per FILE with its short summary and full passage text for the Inspector."""
     ids = list({c["doc_id"] for c in ctx})
     docs = await mdb.col("documents").find(
         {"_id": {"$in": ids}, "org_id": user.org_id},
-        {"filename": 1, "doc_type": 1, "dynamic_metadata.summary": 1}).to_list(None)
+        {"filename": 1, "doc_type": 1, "classification_level": 1, "department": 1, "dynamic_metadata.summary": 1}).to_list(None)
     meta = {d["_id"]: d for d in docs}
     out: dict[str, dict] = {}
-    for c in cites:  # already in rank order
+    for c in cites:
         d = meta.get(c.doc_id, {})
         s = out.setdefault(c.doc_id, {
             "doc_id": c.doc_id, "title": c.title, "filename": d.get("filename", ""),
             "doc_type": d.get("doc_type", ""),
-            "summary": ((d.get("dynamic_metadata") or {}).get("summary") or "")[:300],
+            "department": d.get("department", ""),
+            "classification_level": d.get("classification_level", 0),
+            "summary": ((d.get("dynamic_metadata") or {}).get("summary") or "")[:500],
             "passages": []})
-        s["passages"].append({"n": c.n, "location": c.location, "score": c.score})
+        s["passages"].append({"n": c.n, "location": c.location, "score": c.score, "text": c.snippet})
     return list(out.values())
 
 
@@ -92,19 +121,29 @@ async def answer_stream(user, question: str, session_id: str | None = None):
     trace_id_var.set(trace_id)
 
     history = await session_service.load_history(user, session_id) if session_id else []
-    standalone = await _condense(question, history)
+    standalone, wants_prev_doc = await _condense(question, history)
 
-    rewritten = None
-    ctx, conf = await _retrieve(user, standalone)
-    if conf < settings.confidence_hi:
-        ok = conf >= settings.confidence_lo and await _grade(standalone, ctx)
-        if not ok:
-            rewritten = await _rewrite(standalone)
-            ctx2, conf2 = await _retrieve(user, rewritten)
-            if conf2 > conf:
-                ctx, conf = ctx2, conf2
+    rewritten, mode = None, "rag"
+    ctx: list[dict] = []
+    conf: float | None = 0.0
 
-    abstained = (not ctx) or conf < settings.confidence_lo
+    if wants_prev_doc:
+        last = next((m for m in reversed(history) if m["role"] == "assistant" and m["doc_ids"]), None)
+        if last:
+            ctx = await _focus_chunks(user, last["doc_ids"])
+            if ctx:
+                mode, conf = "document_focus", None
+    if mode == "rag":
+        ctx, conf = await _retrieve(user, standalone)
+        if conf < settings.confidence_hi:
+            ok = conf >= settings.confidence_lo and await _grade(standalone, ctx)
+            if not ok:
+                rewritten = await _rewrite(standalone)
+                ctx2, conf2 = await _retrieve(user, rewritten)
+                if conf2 > conf:
+                    ctx, conf = ctx2, conf2
+
+    abstained = (not ctx) or (conf is not None and conf < settings.confidence_lo)
     cites = [Citation(n=i + 1, chunk_id=c["chunk_id"], doc_id=c["doc_id"], title=c["title"],
                       location=c["location"], score=round(c["confidence"], 4), snippet=c["text"][:300])
              for i, c in enumerate(ctx)]
@@ -123,19 +162,19 @@ async def answer_stream(user, question: str, session_id: str | None = None):
             yield "token", tok
 
     latency = int((time.perf_counter() - t0) * 1000)
-    retrieved_docs = sorted({c["doc_id"] for c in ctx})
+    used_docs = sorted({c["doc_id"] for c in ctx})
     if session_id:  # saved together at the end so a failed stream never leaves half a turn
         await session_service.add_message(user, session_id, "user", question)
         await session_service.add_message(user, session_id, "assistant", answer,
-                                          [] if abstained else retrieved_docs, sources)
+                                          [] if abstained else used_docs, sources)
     log_id = await obs.save_query_log({
         "org_id": user.org_id, "user_id": user.user_id, "session_id": session_id, "trace_id": trace_id,
-        "question": question, "standalone": standalone if standalone != question else None,
+        "mode": mode, "question": question, "standalone": standalone if standalone != question else None,
         "rewritten": rewritten, "answer": answer, "confidence": conf, "abstained": abstained,
         "latency_ms": latency, "chunk_ids": [c["chunk_id"] for c in ctx]})
-    await audit_service.record("query", user, doc_ids=retrieved_docs, log_id=log_id, session_id=session_id)
-    if not abstained:
+    await audit_service.record("query", user, doc_ids=used_docs, log_id=log_id, session_id=session_id)
+    if ctx and not abstained:
         _bgtask(obs.run_sampled_eval(log_id, standalone, answer, [c["text"] for c in ctx]))
-    yield "done", {"log_id": log_id, "trace_id": trace_id, "session_id": session_id,
-                   "confidence": round(conf, 4), "abstained": abstained,
+    yield "done", {"log_id": log_id, "trace_id": trace_id, "session_id": session_id, "mode": mode,
+                   "confidence": None if conf is None else round(conf, 4), "abstained": abstained,
                    "latency_ms": latency, "rewritten_query": rewritten}
