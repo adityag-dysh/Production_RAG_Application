@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     rate_limit_password_per_min: int = 5
     focus_max_chars: int = 14000      # max document text loaded for "summarize this doc"
 
+    # semantic cache
+    semantic_cache_enabled: bool = True
+    semantic_cache_threshold: float = 0.95
+    semantic_cache_ttl_seconds: int = 86400
+
 
 @lru_cache
 def get_settings() -> Settings:

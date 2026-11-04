@@ -12,7 +12,7 @@ from app.api.v1.schemas.RAG_schemas import Citation, GradeResult
 from app.core.acl import acl_allows
 from app.core.config import settings
 from app.core.logging import trace_id_var
-from app.services import (audit_service, gemini_service, mongodb_service as mdb,
+from app.services import (audit_service, cache_service, gemini_service, mongodb_service as mdb,
                           observability_service as obs, reranker_service, retriever_service,
                           session_service, template_manager)
 
@@ -123,46 +123,73 @@ async def answer_stream(user, question: str, session_id: str | None = None):
     history = await session_service.load_history(user, session_id) if session_id else []
     standalone, wants_prev_doc = await _condense(question, history)
 
-    rewritten, mode = None, "rag"
-    ctx: list[dict] = []
-    conf: float | None = 0.0
+    # 1. Check semantic cache first (only if no conversation history or document focus)
+    cached = None
+    query_emb = []
+    if not history and not wants_prev_doc:
+        try:
+            query_emb = await gemini_service.embed_query(standalone)
+            cached = await cache_service.get_cached_answer(user.org_id, user.clearance_level, query_emb)
+        except Exception:
+            pass
 
-    if wants_prev_doc:
-        last = next((m for m in reversed(history) if m["role"] == "assistant" and m["doc_ids"]), None)
-        if last:
-            ctx = await _focus_chunks(user, last["doc_ids"])
-            if ctx:
-                mode, conf = "document_focus", None
-    if mode == "rag":
-        ctx, conf = await _retrieve(user, standalone)
-        if conf < settings.confidence_hi:
-            ok = conf >= settings.confidence_lo and await _grade(standalone, ctx)
-            if not ok:
-                rewritten = await _rewrite(standalone)
-                ctx2, conf2 = await _retrieve(user, rewritten)
-                if conf2 > conf:
-                    ctx, conf = ctx2, conf2
-
-    abstained = (not ctx) or (conf is not None and conf < settings.confidence_lo)
-    cites = [Citation(n=i + 1, chunk_id=c["chunk_id"], doc_id=c["doc_id"], title=c["title"],
-                      location=c["location"], score=round(c["confidence"], 4), snippet=c["text"][:300])
-             for i, c in enumerate(ctx)]
-    sources: list[dict] = []
-    answer = ""
-    if abstained:
-        answer = ABSTAIN
-        yield "token", answer
+    if cached:
+        yield "context", cached["cites"]
+        yield "sources", cached["sources"]
+        yield "token", cached["answer"]
+        answer = cached["answer"]
+        sources = cached["sources"]
+        cites_data = cached["cites"]
+        abstained = (answer == ABSTAIN)
+        mode, conf, rewritten = "cache_hit", 1.0, None
     else:
-        sources = await _sources(user, ctx, cites)
-        yield "context", [c.model_dump() for c in cites]
-        yield "sources", sources
-        prompt = template_manager.render("rag_generation.j2", question=standalone, contexts=ctx, history=history)
-        async for tok in gemini_service.generate_stream(prompt):
-            answer += tok
-            yield "token", tok
+        rewritten, mode = None, "rag"
+        ctx: list[dict] = []
+        conf: float | None = 0.0
+
+        if wants_prev_doc:
+            last = next((m for m in reversed(history) if m["role"] == "assistant" and m["doc_ids"]), None)
+            if last:
+                ctx = await _focus_chunks(user, last["doc_ids"])
+                if ctx:
+                    mode, conf = "document_focus", None
+        if mode == "rag":
+            ctx, conf = await _retrieve(user, standalone)
+            if conf < settings.confidence_hi:
+                ok = conf >= settings.confidence_lo and await _grade(standalone, ctx)
+                if not ok:
+                    rewritten = await _rewrite(standalone)
+                    ctx2, conf2 = await _retrieve(user, rewritten)
+                    if conf2 > conf:
+                        ctx, conf = ctx2, conf2
+
+        abstained = (not ctx) or (conf is not None and conf < settings.confidence_lo)
+        cites = [Citation(n=i + 1, chunk_id=c["chunk_id"], doc_id=c["doc_id"], title=c["title"],
+                          location=c["location"], score=round(c["confidence"], 4), snippet=c["text"])
+                 for i, c in enumerate(ctx)]
+        sources = []
+        answer = ""
+        if abstained:
+            answer = ABSTAIN
+            yield "token", answer
+        else:
+            sources = await _sources(user, ctx, cites)
+            cites_dicts = [c.model_dump() for c in cites]
+            yield "context", cites_dicts
+            yield "sources", sources
+            prompt = template_manager.render("rag_generation.j2", question=standalone, contexts=ctx, history=history)
+            async for tok in gemini_service.generate_stream(prompt):
+                answer += tok
+                yield "token", tok
+            
+            # Store in semantic cache
+            if not wants_prev_doc and not abstained and query_emb:
+                _bgtask(cache_service.set_cached_answer(
+                    user.org_id, user.clearance_level, standalone, query_emb, answer, sources, cites_dicts
+                ))
 
     latency = int((time.perf_counter() - t0) * 1000)
-    used_docs = sorted({c["doc_id"] for c in ctx})
+    used_docs = sorted({c["doc_id"] for c in cached.get("cites", [])} if cached else {c["doc_id"] for c in ctx})
     if session_id:  # saved together at the end so a failed stream never leaves half a turn
         await session_service.add_message(user, session_id, "user", question)
         await session_service.add_message(user, session_id, "assistant", answer,
@@ -171,7 +198,7 @@ async def answer_stream(user, question: str, session_id: str | None = None):
         "org_id": user.org_id, "user_id": user.user_id, "session_id": session_id, "trace_id": trace_id,
         "mode": mode, "question": question, "standalone": standalone if standalone != question else None,
         "rewritten": rewritten, "answer": answer, "confidence": conf, "abstained": abstained,
-        "latency_ms": latency, "chunk_ids": [c["chunk_id"] for c in ctx]})
+        "latency_ms": latency, "chunk_ids": [] if cached else [c["chunk_id"] for c in ctx]})
     await audit_service.record("query", user, doc_ids=used_docs, log_id=log_id, session_id=session_id)
     if ctx and not abstained:
         _bgtask(obs.run_sampled_eval(log_id, standalone, answer, [c["text"] for c in ctx]))

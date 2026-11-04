@@ -97,6 +97,16 @@ function newBox() {
 /* ---------- source inspector drawer ---------- */
 let currentSourcesMap = {};
 
+let activeQueryKeywords = [];
+
+function highlightKeywords(text, keywords) {
+  if (!keywords || keywords.length === 0 || !text) return text;
+  // Escape special regex chars and sort by length descending to match longest phrases first
+  const sortedKw = [...new Set(keywords)].sort((a, b) => b.length - a.length);
+  const regex = new RegExp(`(${sortedKw.map(k => k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|')})`, 'gi');
+  return text.replace(regex, '<mark>$1</mark>');
+}
+
 function openSourceDrawer(sourceInfo) {
   const drawer = $("sourceDrawer");
   const content = $("drawerContent");
@@ -115,13 +125,16 @@ function openSourceDrawer(sourceInfo) {
     content.append(el("p", sourceInfo.summary));
   }
 
-  content.append(el("strong", "Matching Passages:"));
+  content.append(el("strong", "Matching Passages (Full Text & Keyword Matches):"));
   if (sourceInfo.passages && sourceInfo.passages.length > 0) {
     sourceInfo.passages.forEach((p) => {
       const pBox = el("div", null, "card");
       pBox.style.margin = "8px 0"; pBox.style.padding = "10px"; pBox.style.background = "rgba(128,128,128,0.05)";
       pBox.append(el("small", `Passage [${p.n}] — Location: ${p.location || "—"}`, "mut"));
-      pBox.append(el("p", p.text));
+      
+      const pText = el("p");
+      pText.innerHTML = highlightKeywords(p.text || "", activeQueryKeywords);
+      pBox.append(pText);
       content.append(pBox);
     });
   } else {
@@ -195,6 +208,10 @@ function addFeedback(meta, logId) {
 async function ask() {
   const q = $("question").value.trim();
   if (!q || asking) return;
+  
+  // Extract keywords from user query for highlighting in source inspector
+  activeQueryKeywords = q.split(/\s+/).filter(w => w.length > 2);
+
   asking = true; $("ask").disabled = true; $("question").value = "";
   $("messages").append(el("div", q, "msg q"));
   const { text, src, meta } = newBox();
