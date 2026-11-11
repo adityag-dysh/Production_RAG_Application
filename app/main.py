@@ -12,17 +12,37 @@ from app.api.v1.endpoints import auth, etl, observability, rag
 from app.core.config import settings
 from app.core.exceptions import register_handlers
 from app.core.logging import setup_logging, trace_id_var
+from app.mcp.server import auth_middleware, mcp
 from app.services import mongodb_service, vectordb_service
 
 log = logging.getLogger("app.http")
 
 
+def _make_mcp_http_app():
+    """Build FastMCP's streamable HTTP app for mounting at /mcp without creating /mcp/mcp."""
+    try:
+        old_path = mcp.settings.streamable_http_path
+        mcp.settings.streamable_http_path = "/"
+        try:
+            return mcp.streamable_http_app()
+        finally:
+            mcp.settings.streamable_http_path = old_path
+    except AttributeError:
+        return mcp.streamable_http_app()
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     setup_logging()
     await mongodb_service.ensure_indexes()
     await vectordb_service.ensure_index()
-    yield
+
+    mcp_child_app = getattr(app.state, "mcp_http_app", None)
+    if mcp_child_app:
+        async with mcp_child_app.router.lifespan_context(mcp_child_app):
+            yield
+    else:
+        yield
 
     logging.getLogger("app").info("retrieval_mode", extra={"mode": settings.retrieval_mode})
 
@@ -49,6 +69,12 @@ def create_app() -> FastAPI:
 
     for r in (auth.router, etl.router, rag.router, observability.router):
         app.include_router(r, prefix="/api/v1")
+
+    if settings.mcp_enabled:
+        mcp_child_app = _make_mcp_http_app()
+        app.state.mcp_http_app = mcp_child_app
+        app.mount("/mcp", auth_middleware(mcp_child_app), name="mcp")
+
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
     return app
 
