@@ -24,7 +24,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    h = logging.StreamHandler(sys.stdout)
+    h = logging.StreamHandler(sys.stderr)  # stderr: stdout is reserved for the MCP stdio JSON-RPC channel
     h.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [h]

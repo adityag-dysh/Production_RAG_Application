@@ -70,16 +70,19 @@ async function showApp() {
   $("app").hidden = false;
   renderWho();
   if ($("dashTab")) $("dashTab").hidden = !me.is_admin;
-  if ($("usersTab")) $("usersTab").hidden = !(me.role === "ceo" || me.role === "hr" || me.is_admin);
+  const canManageKeys = me.role === "ceo" || me.role === "hr" || me.is_admin;
+  if ($("usersTab")) $("usersTab").hidden = !canManageKeys;
+  if ($("keysTab")) $("keysTab").hidden = !canManageKeys;
   await loadSessions();
 }
 
 /* ---------- tabs ---------- */
 function showTab(name) {
   document.querySelectorAll("nav button[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["chat", "upload", "docs", "users", "profile", "dash"].forEach((t) => { const s = $("tab-" + t); if (s) s.hidden = t !== name; });
+  ["chat", "upload", "docs", "users", "keys", "profile", "dash"].forEach((t) => { const s = $("tab-" + t); if (s) s.hidden = t !== name; });
   clearTimeout(docsTimer);
   if (name === "docs") loadDocs();
+  if (name === "keys") fillKeysTab();
   if (name === "dash") loadDash();
   if (name === "profile") fillProfile();
 }
@@ -376,6 +379,9 @@ function renderUploadQueue() {
     if (item.error) {
       info.append(el("br"), el("small", item.error, "err"));
     }
+    if (item.note) {
+      info.append(el("br"), el("small", item.note, "mut"));
+    }
     row.append(info);
     if (item.status === "pending") {
       const rm = el("button", "Remove");
@@ -415,6 +421,7 @@ async function upload() {
       const r = await api("/etl/upload", { method: "POST", body: fd });
       const j = await r.json();
       item.status = "success";
+      item.note = j.deduplicated ? "duplicate skipped" : (j.parts && j.parts > 1 ? `split into ${j.parts} parts` : null);
       successCount++;
     } catch (e) {
       item.status = "error";
@@ -484,6 +491,141 @@ async function createUser() {
   }
 }
 
+/* ---------- MCP API keys ---------- */
+let lastGeneratedApiKey = null;
+
+function fmtDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+}
+
+function mcpUrl() {
+  return `${window.location.origin}/mcp`;
+}
+
+function mcpConfigSnippet(secret) {
+  return JSON.stringify({
+    mcpServers: {
+      "rag-app": {
+        type: "streamable_http",
+        url: mcpUrl(),
+        headers: { Authorization: `Bearer ${secret}` }
+      }
+    }
+  }, null, 2);
+}
+
+function showApiKeyResult(j) {
+  lastGeneratedApiKey = j.api_key || "";
+  $("apiKeySecret").value = lastGeneratedApiKey;
+  $("mcpConfigSnippet").textContent = mcpConfigSnippet(lastGeneratedApiKey);
+  $("apiKeyResult").hidden = false;
+}
+
+function hideApiKeyResult() {
+  lastGeneratedApiKey = null;
+  $("apiKeySecret").value = "";
+  $("mcpConfigSnippet").textContent = "";
+  $("apiKeyResult").hidden = true;
+}
+
+async function copyText(text, msgId = "apiKeyMsg") {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    setMsg(msgId, "Copied to clipboard.", true);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.append(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    setMsg(msgId, "Copied to clipboard.", true);
+  }
+}
+
+function fillKeysTab() {
+  const max = Math.max(0, Math.min(4, Number(me?.clearance_level ?? 4)));
+  const sel = $("apiKeyClearance");
+  sel.replaceChildren(...Array.from({ length: max + 1 }, (_, i) => new Option(`L${i}`, String(i))));
+  sel.value = String(Math.min(2, max));
+  $("apiKeyExpires").value = "90";
+  document.querySelectorAll(".apiKeyScope").forEach((c) => { c.checked = ["read", "generate"].includes(c.value); });
+  setMsg("apiKeyMsg", "", true);
+  hideApiKeyResult();
+  loadKeys();
+}
+
+async function loadKeys() {
+  const t = $("keysTable");
+  let keys;
+  try { keys = await (await api("/auth/api-keys")).json(); }
+  catch (e) { t.replaceChildren(el("caption", "Error: " + e.message)); return; }
+
+  t.replaceChildren();
+  const h = el("tr");
+  ["Label", "Prefix", "Max clearance", "Scopes", "Created", "Expires", "Action"].forEach((x) => h.append(el("th", x)));
+  t.append(h);
+
+  if (!keys.length) {
+    const empty = el("tr");
+    const td = el("td", "No MCP API keys yet.");
+    td.colSpan = 7;
+    empty.append(td);
+    t.append(empty);
+    return;
+  }
+
+  keys.forEach((k) => {
+    const r = el("tr");
+    [k.label || "—", k.prefix || "—", `L${k.max_clearance}`, (k.scopes || []).join(", ") || "—",
+     fmtDate(k.created_at), fmtDate(k.expires_at)].forEach((x) => r.append(el("td", String(x))));
+    const td = el("td");
+    const btn = el("button", "Revoke");
+    btn.onclick = () => revokeApiKey(k.key_id, k.label || "this key");
+    td.append(btn);
+    r.append(td);
+    t.append(r);
+  });
+}
+
+async function generateApiKey() {
+  const label = $("apiKeyLabel").value.trim();
+  const scopes = [...document.querySelectorAll(".apiKeyScope:checked")].map((c) => c.value);
+  const max_clearance = parseInt($("apiKeyClearance").value, 10);
+  const expires_in_days = parseInt($("apiKeyExpires").value, 10);
+
+  if (!label) { setMsg("apiKeyMsg", "Label is required.", false); return; }
+  if (!scopes.length) { setMsg("apiKeyMsg", "Select at least one scope.", false); return; }
+  if (!Number.isInteger(max_clearance) || max_clearance < 0 || max_clearance > 4) { setMsg("apiKeyMsg", "Invalid clearance level.", false); return; }
+  if (!Number.isInteger(expires_in_days) || expires_in_days < 1 || expires_in_days > 365) { setMsg("apiKeyMsg", "Expiration must be between 1 and 365 days.", false); return; }
+
+  try {
+    const j = await (await api("/auth/api-keys", jsonBody("POST", { label, max_clearance, scopes, expires_in_days }))).json();
+    setMsg("apiKeyMsg", `Key created successfully. Prefix: ${j.prefix}`, true);
+    $("apiKeyLabel").value = "";
+    showApiKeyResult(j);
+    await loadKeys();
+  } catch (e) {
+    setMsg("apiKeyMsg", e.message, false);
+  }
+}
+
+async function revokeApiKey(keyId, label) {
+  if (!confirm(`Revoke MCP API key "${label}"? Agents using it will lose access immediately.`)) return;
+  try {
+    await api(`/auth/api-keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
+    setMsg("apiKeyMsg", "Key revoked.", true);
+    await loadKeys();
+  } catch (e) {
+    setMsg("apiKeyMsg", e.message, false);
+  }
+}
+
 /* ---------- dashboard ---------- */
 async function loadDash() {
   try { $("dash").textContent = JSON.stringify(await (await api("/observability/summary")).json(), null, 2); }
@@ -505,6 +647,11 @@ on("delChat", "onclick", deleteSession);
 on("saveName", "onclick", saveName);
 on("changePw", "onclick", changePassword);
 on("createUserBtn", "onclick", createUser);
+on("generateApiKeyBtn", "onclick", generateApiKey);
+on("refreshKeys", "onclick", loadKeys);
+on("copyApiKey", "onclick", () => copyText(lastGeneratedApiKey || $("apiKeySecret").value));
+on("copyMcpConfig", "onclick", () => copyText($("mcpConfigSnippet").textContent));
+on("dismissApiKey", "onclick", hideApiKeyResult);
 on("closeDrawer", "onclick", closeSourceDrawer);
 setupDropZone();
 

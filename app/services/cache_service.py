@@ -1,21 +1,22 @@
-"""Redis-backed semantic query cache with cosine similarity matching."""
+"""Redis-backed semantic query cache + embedding cache with cosine similarity matching."""
+import hashlib
 import json
 import logging
 import math
-import redis.asyncio as aioredis
 
 from app.core.config import settings
 
 log = logging.getLogger("app.cache")
-_redis: aioredis.Redis | None = None
+_redis = None
 
 
-def _get_redis() -> aioredis.Redis | None:
+def _get_redis():
     global _redis
-    if not settings.semantic_cache_enabled:
+    if not settings.semantic_cache_enabled and not settings.embed_cache_enabled:
         return None
     if _redis is None:
         try:
+            import redis.asyncio as aioredis
             _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
         except Exception:
             log.exception("redis_connection_failed")
@@ -100,3 +101,46 @@ async def set_cached_answer(org_id: str, clearance_level: int, query_text: str, 
         await r.set(key, json.dumps(payload), ex=settings.semantic_cache_ttl_seconds)
     except Exception:
         log.exception("semantic_cache_set_failed")
+
+
+def _emb_key(text: str, task: str) -> str:
+    h = hashlib.sha256(f"{task}:{text}".encode()).hexdigest()[:40]
+    return f"emb:{task}:{h}"
+
+
+async def get_cached_embeddings(texts: list[str], task: str) -> list[list[float] | None]:
+    """Batch lookup of embedding cache; returns list aligned with texts (None on miss)."""
+    r = _get_redis()
+    if not r or not texts:
+        return [None] * len(texts)
+    try:
+        keys = [_emb_key(t, task) for t in texts]
+        vals = await r.mget(keys)
+        out: list[list[float] | None] = []
+        for raw in vals:
+            if not raw:
+                out.append(None)
+                continue
+            try:
+                v = json.loads(raw)
+                out.append(v if isinstance(v, list) and v else None)
+            except Exception:
+                out.append(None)
+        return out
+    except Exception:
+        log.exception("embedding_cache_get_failed")
+        return [None] * len(texts)
+
+
+async def set_cached_embeddings(pairs: list[tuple[str, str, list[float]]]) -> None:
+    """pairs = [(text, task, vector), ...]"""
+    r = _get_redis()
+    if not r or not pairs:
+        return
+    try:
+        pipeline = r.pipeline()
+        for text, task, vec in pairs:
+            pipeline.set(_emb_key(text, task), json.dumps(vec), ex=settings.embed_cache_ttl_seconds)
+        await pipeline.execute()
+    except Exception:
+        log.exception("embedding_cache_set_failed")

@@ -205,3 +205,18 @@ async def answer_stream(user, question: str, session_id: str | None = None):
     yield "done", {"log_id": log_id, "trace_id": trace_id, "session_id": session_id, "mode": mode,
                    "confidence": None if conf is None else round(conf, 4), "abstained": abstained,
                    "latency_ms": latency, "rewritten_query": rewritten}
+
+
+async def answer_once(user, question: str, session_id: str | None = None) -> dict:
+    """Consume answer_stream into a single dict (for MCP / non-streaming callers)."""
+    answer, sources, done = "", [], {}
+    async for ev, data in answer_stream(user, question, session_id):
+        if ev == "token":
+            answer += data
+        elif ev == "sources":
+            sources = data
+        elif ev == "done":
+            done = data
+    return {"answer": answer, "sources": sources,
+            "confidence": done.get("confidence"), "abstained": done.get("abstained"),
+            "latency_ms": done.get("latency_ms"), "log_id": done.get("log_id")}

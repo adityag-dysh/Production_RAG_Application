@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import AsyncIterator
@@ -8,10 +9,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.api.v1.schemas.metadata_schemas import DynamicMetadata
 from app.core.config import settings
-from app.services import template_manager
+from app.core.rate_limiter import TokenBucket
+from app.services import cache_service, template_manager
 
 log = logging.getLogger("app.gemini")
 _client: genai.Client | None = None
+_embedding_semaphore = asyncio.Semaphore(2)  # Limit concurrent embedding requests to avoid 429 quota exhaustion
 
 
 def _c() -> genai.Client:
@@ -21,26 +24,62 @@ def _c() -> genai.Client:
     return _client
 
 
-_retry = retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+_retry = retry(stop=stop_after_attempt(6), wait=wait_exponential(min=2, max=60), reraise=True)
+
+_req_bucket = TokenBucket(settings.embed_rpm_limit, settings.embed_rpm_limit)
+_tok_bucket = TokenBucket(settings.embed_tpm_limit, settings.embed_tpm_limit)
 
 
 @_retry
 async def _embed(texts: list[str], task: str) -> list[list[float]]:
-    r = await _c().aio.models.embed_content(
-        model=settings.embed_model, contents=texts,
-        config=types.EmbedContentConfig(task_type=task, output_dimensionality=settings.embed_dim))
-    return [e.values for e in r.embeddings]
+    async with _embedding_semaphore:
+        if settings.embed_rate_limit_enabled:
+            await _req_bucket.acquire(1)
+            await _tok_bucket.acquire(max(sum(len(t) for t in texts) // 4, 1))
+        r = await _c().aio.models.embed_content(
+            model=settings.embed_model, contents=texts,
+            config=types.EmbedContentConfig(task_type=task, output_dimensionality=settings.embed_dim))
+        return [e.values for e in r.embeddings]
 
 
 async def embed_documents(texts: list[str]) -> list[list[float]]:
-    out: list[list[float]] = []
-    for i in range(0, len(texts), 100):
-        out += await _embed(texts[i:i + 100], "RETRIEVAL_DOCUMENT")
-    return out
+    """Embed with per-chunk cache (skip Gemini on identical text) + paced batching."""
+    if not texts:
+        return []
+    out: list[list[float] | None] = [None] * len(texts)
+    miss: list[int] = []
+    if settings.embed_cache_enabled:
+        cached = await cache_service.get_cached_embeddings(texts, "RETRIEVAL_DOCUMENT")
+        for i, c in enumerate(cached):
+            if c is not None:
+                out[i] = c
+            else:
+                miss.append(i)
+    else:
+        miss = list(range(len(texts)))
+
+    for j in range(0, len(miss), 50):
+        idxs = miss[j:j + 50]
+        vecs = await _embed([texts[i] for i in idxs], "RETRIEVAL_DOCUMENT")
+        for i, v in zip(idxs, vecs):
+            out[i] = v
+        if settings.embed_cache_enabled:
+            await cache_service.set_cached_embeddings(
+                [(texts[i], "RETRIEVAL_DOCUMENT", v) for i, v in zip(idxs, vecs)])
+        if j + 50 < len(miss):
+            await asyncio.sleep(1.0)
+    return out  # type: ignore[return-value]
 
 
 async def embed_query(text: str) -> list[float]:
-    return (await _embed([text], "RETRIEVAL_QUERY"))[0]
+    if settings.embed_cache_enabled:
+        hit = (await cache_service.get_cached_embeddings([text], "RETRIEVAL_QUERY"))[0]
+        if hit:
+            return hit
+    vec = (await _embed([text], "RETRIEVAL_QUERY"))[0]
+    if settings.embed_cache_enabled:
+        await cache_service.set_cached_embeddings([(text, "RETRIEVAL_QUERY", vec)])
+    return vec
 
 
 @_retry

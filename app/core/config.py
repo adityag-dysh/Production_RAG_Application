@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     confidence_lo: float = 0.20
     eval_sample_rate: float = 0.1
     max_upload_mb: int = 25
+    max_large_upload_mb: int = 200
+    chunked_upload_part_mb: int = 10
     zip_max_files: int = 500
     zip_max_uncompressed_mb: int = 100
 
@@ -77,6 +79,25 @@ class Settings(BaseSettings):
     semantic_cache_enabled: bool = True
     semantic_cache_threshold: float = 0.95
     semantic_cache_ttl_seconds: int = 86400
+
+    # embedding rate limiting + caching (Gemini free tier: 100 req/min, 30k tokens/min)
+    embed_rate_limit_enabled: bool = True
+    embed_rpm_limit: int = 95
+    embed_tpm_limit: int = 28000
+    embed_cache_enabled: bool = True
+    embed_cache_ttl_seconds: int = 604800   # 7 days
+
+    # upload path: dedup + large-PDF splitting
+    dedup_uploads_enabled: bool = True
+    pdf_split_enabled: bool = True
+    pdf_split_page_threshold: int = 12      # pages per sub-document
+
+    # MCP server (read/generate tools for external AI agents)
+    mcp_enabled: bool = True
+    mcp_name: str = "rag-app"
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8001
+    mcp_api_key_prefix_len: int = 12
 
 
 @lru_cache

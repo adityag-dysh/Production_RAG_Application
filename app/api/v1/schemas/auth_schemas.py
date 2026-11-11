@@ -13,6 +13,7 @@ class UserContext(BaseModel):
     groups: list[str]
     can_upload: bool = False
     is_admin: bool = False
+    api_scopes: list[str] = Field(default_factory=list)
 
 
 class TokenResponse(BaseModel):
@@ -51,3 +52,32 @@ class UserCreateRequest(BaseModel):
     can_upload: bool = False
     is_admin: bool = False
     password: str = Field(min_length=8, max_length=128)
+
+
+class ApiKeyCreate(BaseModel):
+    """Provisions a scoped API key for an MCP agent / service account.
+    max_clearance caps what the key can see, independent of the owner's own clearance."""
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=60)
+    max_clearance: int = Field(ge=0, le=4, default=2)
+    scopes: list[str] = Field(default_factory=lambda: ["read"])
+    expires_in_days: int = Field(ge=1, le=365, default=90)
+
+    @field_validator("label")
+    @classmethod
+    def _clean_label(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not v:
+            raise ValueError("Label cannot be empty")
+        return v
+
+    @field_validator("scopes")
+    @classmethod
+    def _clean_scopes(cls, v: list[str]) -> list[str]:
+        allowed = {"read", "generate", "documents", "identity"}
+        cleaned = sorted({s.strip().lower() for s in v if s.strip()})
+        if not cleaned:
+            raise ValueError("At least one scope is required")
+        if not set(cleaned) <= allowed:
+            raise ValueError("Invalid MCP API key scope")
+        return cleaned

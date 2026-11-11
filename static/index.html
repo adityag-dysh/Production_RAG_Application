@@ -18,6 +18,7 @@
       <button data-tab="upload">Upload</button>
       <button data-tab="docs">Documents</button>
       <button data-tab="users" id="usersTab" hidden>Users</button>
+      <button data-tab="keys" id="keysTab" hidden>MCP Keys</button>
       <button data-tab="profile">Profile</button>
       <button data-tab="dash" id="dashTab" hidden>Dashboard</button>
     </nav>
@@ -71,6 +72,51 @@
       </div>
       <button id="createUserBtn">Create User</button>
       <p id="userMsg"></p>
+    </section>
+
+    <section id="tab-keys" hidden class="card">
+      <h3>MCP API Keys</h3>
+      <p class="mut">Generate scoped <code>sk_live_...</code> keys for external AI agents. Only CEO, HR, and admin accounts can manage these keys.</p>
+
+      <div class="row">
+        <input id="apiKeyLabel" placeholder="Label, e.g. Antigravity - Finance Bot" maxlength="60">
+      </div>
+
+      <div class="row">
+        <label>Max clearance
+          <select id="apiKeyClearance">
+            <option>0</option><option>1</option><option>2</option><option>3</option><option>4</option>
+          </select>
+        </label>
+        <label>Expires in days
+          <input id="apiKeyExpires" type="number" min="1" max="365" value="90">
+        </label>
+      </div>
+
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 12px 0;">
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" class="apiKeyScope" value="read" checked style="width:auto; margin:0;"> read</label>
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" class="apiKeyScope" value="generate" checked style="width:auto; margin:0;"> generate</label>
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" class="apiKeyScope" value="documents" style="width:auto; margin:0;"> documents</label>
+        <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" class="apiKeyScope" value="identity" style="width:auto; margin:0;"> identity</label>
+      </div>
+
+      <button id="generateApiKeyBtn">Generate MCP key</button>
+      <p id="apiKeyMsg"></p>
+
+      <div id="apiKeyResult" hidden>
+        <h4>Copy this key now — it is shown only once.</h4>
+        <textarea id="apiKeySecret" readonly></textarea>
+        <div class="row">
+          <button id="copyApiKey">Copy key</button>
+          <button id="copyMcpConfig">Copy MCP config</button>
+          <button id="dismissApiKey">Done</button>
+        </div>
+        <pre id="mcpConfigSnippet"></pre>
+      </div>
+
+      <h4>Existing keys</h4>
+      <button id="refreshKeys">Refresh</button>
+      <table id="keysTable"></table>
     </section>
 
     <section id="tab-profile" hidden class="card">

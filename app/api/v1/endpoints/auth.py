@@ -1,11 +1,14 @@
 import asyncio
-from datetime import datetime, timezone
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from pymongo import ReturnDocument
 
-from app.api.v1.schemas.auth_schemas import PasswordChange, ProfileUpdate, TokenResponse, UserContext, UserCreateRequest
+from app.api.v1.schemas.auth_schemas import (ApiKeyCreate, PasswordChange, ProfileUpdate, TokenResponse,
+                                             UserContext, UserCreateRequest)
 from app.core import security
 from app.core.config import settings
 from app.core.exceptions import AppError, AuthError, Forbidden
@@ -99,4 +102,34 @@ async def delete_user(email: str, user: UserContext = Depends(security.require_h
     
     await mdb.col("users").update_one({"_id": email}, {"$set": {"active": False}, "$inc": {"token_version": 1}})
     await audit_service.record("user_delete", user, deleted_email=email)
+    return None
+
+
+@router.post("/api-keys", status_code=201)
+async def create_api_key(body: ApiKeyCreate, user: UserContext = Depends(security.require_hr_or_ceo)):
+    if body.max_clearance > user.clearance_level:
+        raise Forbidden("Cannot issue a key above your own clearance")
+    secret = "sk_live_" + secrets.token_urlsafe(32)
+    prefix = secret[: settings.mcp_api_key_prefix_len]
+    key_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    entry = {"key_id": key_id, "label": body.label, "prefix": prefix, "hash": hash_password(secret),
+             "scopes": body.scopes, "max_clearance": body.max_clearance,
+             "created_at": now, "expires_at": now + timedelta(days=body.expires_in_days)}
+    await mdb.col("users").update_one({"_id": user.user_id}, {"$push": {"api_keys": entry}})
+    await audit_service.record("api_key_create", user, key_id=key_id, label=body.label)
+    return {"key_id": key_id, "api_key": secret, "prefix": prefix,
+            "note": "Copy this key now — it is shown only once."}
+
+
+@router.get("/api-keys")
+async def list_api_keys(user: UserContext = Depends(security.require_hr_or_ceo)):
+    u = await mdb.col("users").find_one({"_id": user.user_id}, {"api_keys": 1})
+    return [{k: v for k, v in key.items() if k != "hash"} for key in (u or {}).get("api_keys", [])]
+
+
+@router.delete("/api-keys/{key_id}", status_code=204)
+async def revoke_api_key(key_id: str, user: UserContext = Depends(security.require_hr_or_ceo)):
+    await mdb.col("users").update_one({"_id": user.user_id}, {"$pull": {"api_keys": {"key_id": key_id}}})
+    await audit_service.record("api_key_revoke", user, key_id=key_id)
     return None

@@ -1,3 +1,5 @@
+import hashlib
+
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from app.api.v1.schemas.RAG_schemas import RecordIngestRequest
@@ -36,12 +38,43 @@ async def upload(file: UploadFile = File(...), title: str = Form(...), departmen
     meta = MandatoryMetadata(title=title, department=department, classification_level=classification_level,
                              doc_type=doc_type, allowed_groups=allowed_groups.split(","))
     _check_level(user, meta.classification_level)
-    data = await file.read(settings.max_upload_mb * 2**20 + 1)
-    if len(data) > settings.max_upload_mb * 2**20:
-        raise AppError(f"File exceeds {settings.max_upload_mb} MB")
+
+    # Read up to max_upload_mb + 1 byte to check if it's within standard limit
+    limit_bytes = settings.max_upload_mb * 2**20
+    data = await file.read(limit_bytes + 1)
+    
+    if len(data) > limit_bytes:
+        # If file is larger than 25MB, check against max_large_upload_mb (e.g. 200MB)
+        large_limit_bytes = settings.max_large_upload_mb * 2**20
+        if len(data) > large_limit_bytes:
+            raise AppError(f"File exceeds maximum allowed large upload size of {settings.max_large_upload_mb} MB")
+        
+        # Read the remainder of the large file in chunks
+        chunks = [data]
+        total_len = len(data)
+        while True:
+            chunk = await file.read(10 * 2**20)  # read 10MB parts
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_len += len(chunk)
+            if total_len > large_limit_bytes:
+                raise AppError(f"File exceeds maximum allowed large upload size of {settings.max_large_upload_mb} MB")
+        data = b"".join(chunks)
+
+    if settings.dedup_uploads_enabled:
+        sha = hashlib.sha256(data).hexdigest()
+        existing = await mdb.col("documents").find_one(
+            {"org_id": user.org_id, "source_sha256": sha, "status": {"$in": ["pending", "processing", "indexed"]}},
+            {"_id": 1, "status": 1, "split_total": 1})
+        if existing:
+            await audit_service.record("upload_dedup", user, doc_id=existing["_id"])
+            return {"doc_id": existing["_id"], "status": existing["status"],
+                    "deduplicated": True, "parts": existing.get("split_total", 1)}
+
     doc = await etl_orchestrator.create_document(user, file.filename or "upload", data, meta)
     await audit_service.record("upload", user, doc_id=doc["_id"], level=meta.classification_level)
-    return {"doc_id": doc["_id"], "status": doc["status"]}
+    return {"doc_id": doc["_id"], "status": doc["status"], "parts": doc.get("_split_total", 1)}
 
 
 @router.post("/records", status_code=202)

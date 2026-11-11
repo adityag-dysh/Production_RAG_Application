@@ -2,6 +2,7 @@
 Idempotent (deterministic chunk ids, delete-then-insert) so queue retries are safe.
 Status: pending -> processing -> indexed | failed"""
 import asyncio
+import hashlib
 import io
 import logging
 import uuid
@@ -91,13 +92,50 @@ async def process_document(doc_id: str, raise_on_error: bool = False) -> None:
             raise
 
 
+def _part_name(filename: str, idx: int) -> str:
+    p = Path(filename)
+    return f"{p.stem} (part {idx + 1:02d}){p.suffix}"
+
+
+def _split_pdf(data: bytes) -> list[tuple[int, bytes]]:
+    """Return [(part_index, sub_pdf_bytes)]; a single entry when under the page threshold."""
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(io.BytesIO(data))
+    n = len(reader.pages)
+    step = max(settings.pdf_split_page_threshold, 1)
+    if n <= step:
+        return [(0, data)]
+    out: list[tuple[int, bytes]] = []
+    for i, start in enumerate(range(0, n, step)):
+        w = PdfWriter()
+        for pg in reader.pages[start:start + step]:
+            w.add_page(pg)
+        buf = io.BytesIO(); w.write(buf)
+        out.append((i, buf.getvalue()))
+    return out
+
+
 async def create_document(user, filename: str, data: bytes, meta) -> dict:
-    doc_id = uuid.uuid4().hex
-    uri = await storage_service.save(user.org_id, doc_id, filename, data)
-    doc = {"_id": doc_id, "org_id": user.org_id, "owner_id": user.user_id, "filename": Path(filename).name,
-           "blob_uri": uri, "size": len(data), "status": "pending", "created_at": datetime.now(timezone.utc),
-           "title": meta.title, "department": meta.department, "doc_type": meta.doc_type.value,
-           "classification_level": meta.classification_level, "allowed_groups": meta.allowed_groups}
-    await mdb.col("documents").insert_one(doc)
-    await enqueue(doc_id)
-    return doc
+    source_sha = hashlib.sha256(data).hexdigest()
+    ext = Path(filename).suffix.lower()
+    parts = _split_pdf(data) if (settings.pdf_split_enabled and ext == ".pdf") else [(0, data)]
+    total = len(parts)
+    group_id = uuid.uuid4().hex
+    created: dict | None = None
+    for idx, sub in parts:
+        doc_id = uuid.uuid4().hex
+        fname = filename if total == 1 else _part_name(filename, idx)
+        uri = await storage_service.save(user.org_id, doc_id, fname, sub)
+        doc = {"_id": doc_id, "org_id": user.org_id, "owner_id": user.user_id, "filename": Path(fname).name,
+               "blob_uri": uri, "size": len(sub), "status": "pending", "created_at": datetime.now(timezone.utc),
+               "title": meta.title if total == 1 else f"{meta.title} (Part {idx + 1}/{total})",
+               "department": meta.department, "doc_type": meta.doc_type.value,
+               "classification_level": meta.classification_level, "allowed_groups": meta.allowed_groups,
+               "source_sha256": source_sha, "split_group": group_id, "split_index": idx, "split_total": total}
+        await mdb.col("documents").insert_one(doc)
+        await enqueue(doc_id)
+        if created is None:
+            created = doc
+    assert created is not None
+    created["_split_total"] = total
+    return created

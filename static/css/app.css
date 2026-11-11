@@ -24,4 +24,10 @@ details.sources summary{cursor:pointer;color:var(--acc)}
 .src{padding:8px 0;border-bottom:1px solid #8883}.src p{margin:4px 0}.mut{color:var(--mut)}
 .cite-badge { display: inline-block; background: rgba(47,95,234,0.1); color: var(--acc); padding: 1px 6px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; margin: 0 2px; border: 1px solid rgba(47,95,234,0.3); }
 .cite-badge:hover { background: var(--acc); color: #fff; }
+textarea{width:100%;min-height:74px;padding:8px;border:1px solid #8886;border-radius:6px;background:var(--card);color:var(--fg);font-family:monospace;font-size:12px;resize:vertical}
+#apiKeyResult{margin-top:12px;padding:12px;border:1px solid var(--acc);border-radius:8px;background:rgba(47,95,234,0.05)}
+#apiKeyResult h4{margin:0 0 8px 0}
+#apiKeyResult pre{margin:10px 0 0 0;background:rgba(128,128,128,0.08)}
 .ok{color:#2e7d32}hr{border:0;border-top:1px solid #8883;margin:16px 0}label{display:block;margin:6px 0}
+mark { background: #fef08a; color: #1e293b; padding: 0 2px; border-radius: 2px; }
+@media(prefers-color-scheme:dark){mark { background: #854d0e; color: #fef08a; }}
