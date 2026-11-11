@@ -554,7 +554,7 @@ function fillKeysTab() {
   sel.replaceChildren(...Array.from({ length: max + 1 }, (_, i) => new Option(`L${i}`, String(i))));
   sel.value = String(Math.min(2, max));
   $("apiKeyExpires").value = "90";
-  document.querySelectorAll(".apiKeyScope").forEach((c) => { c.checked = ["read", "generate"].includes(c.value); });
+  document.querySelectorAll(".apiKeyScope").forEach((c) => { c.checked = ["read", "generate", "identity"].includes(c.value); });
   setMsg("apiKeyMsg", "", true);
   hideApiKeyResult();
   loadKeys();
@@ -585,9 +585,12 @@ async function loadKeys() {
     [k.label || "—", k.prefix || "—", `L${k.max_clearance}`, (k.scopes || []).join(", ") || "—",
      fmtDate(k.created_at), fmtDate(k.expires_at)].forEach((x) => r.append(el("td", String(x))));
     const td = el("td");
+    const edit = el("button", "Edit scopes");
+    edit.style.marginRight = "6px";
+    edit.onclick = () => editApiKeyScopes(k);
     const btn = el("button", "Revoke");
     btn.onclick = () => revokeApiKey(k.key_id, k.label || "this key");
-    td.append(btn);
+    td.append(edit, btn);
     r.append(td);
     t.append(r);
   });
@@ -620,6 +623,21 @@ async function revokeApiKey(keyId, label) {
   try {
     await api(`/auth/api-keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
     setMsg("apiKeyMsg", "Key revoked.", true);
+    await loadKeys();
+  } catch (e) {
+    setMsg("apiKeyMsg", e.message, false);
+  }
+}
+
+async function editApiKeyScopes(k) {
+  const current = (k.scopes || []).join(", ");
+  const input = prompt("Allowed scopes: read, generate, documents, identity", current || "read, generate");
+  if (input === null) return;
+  const scopes = input.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (!scopes.length) { setMsg("apiKeyMsg", "At least one scope is required.", false); return; }
+  try {
+    await api(`/auth/api-keys/${encodeURIComponent(k.key_id)}`, jsonBody("PATCH", { scopes }));
+    setMsg("apiKeyMsg", `Scopes updated for ${k.label || "this key"}.`, true);
     await loadKeys();
   } catch (e) {
     setMsg("apiKeyMsg", e.message, false);

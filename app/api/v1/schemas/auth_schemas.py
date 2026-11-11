@@ -2,6 +2,17 @@ import unicodedata
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+ALLOWED_MCP_SCOPES = {"read", "generate", "documents", "identity"}
+
+
+def normalize_mcp_scopes(v: list[str]) -> list[str]:
+    cleaned = sorted({s.strip().lower() for s in v if s.strip()})
+    if not cleaned:
+        raise ValueError("At least one scope is required")
+    if not set(cleaned) <= ALLOWED_MCP_SCOPES:
+        raise ValueError("Invalid MCP API key scope")
+    return cleaned
+
 
 class UserContext(BaseModel):
     user_id: str
@@ -74,10 +85,15 @@ class ApiKeyCreate(BaseModel):
     @field_validator("scopes")
     @classmethod
     def _clean_scopes(cls, v: list[str]) -> list[str]:
-        allowed = {"read", "generate", "documents", "identity"}
-        cleaned = sorted({s.strip().lower() for s in v if s.strip()})
-        if not cleaned:
-            raise ValueError("At least one scope is required")
-        if not set(cleaned) <= allowed:
-            raise ValueError("Invalid MCP API key scope")
-        return cleaned
+        return normalize_mcp_scopes(v)
+
+
+class ApiKeyUpdate(BaseModel):
+    """Updates the allowed MCP tool scopes for an existing API key, without exposing or rotating the secret."""
+    model_config = ConfigDict(extra="forbid")
+    scopes: list[str]
+
+    @field_validator("scopes")
+    @classmethod
+    def _clean_scopes(cls, v: list[str]) -> list[str]:
+        return normalize_mcp_scopes(v)

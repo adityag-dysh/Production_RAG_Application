@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from pymongo import ReturnDocument
 
-from app.api.v1.schemas.auth_schemas import (ApiKeyCreate, PasswordChange, ProfileUpdate, TokenResponse,
+from app.api.v1.schemas.auth_schemas import (ApiKeyCreate, ApiKeyUpdate, PasswordChange, ProfileUpdate, TokenResponse,
                                              UserContext, UserCreateRequest)
 from app.core import security
 from app.core.config import settings
@@ -126,6 +126,22 @@ async def create_api_key(body: ApiKeyCreate, user: UserContext = Depends(securit
 async def list_api_keys(user: UserContext = Depends(security.require_hr_or_ceo)):
     u = await mdb.col("users").find_one({"_id": user.user_id}, {"api_keys": 1})
     return [{k: v for k, v in key.items() if k != "hash"} for key in (u or {}).get("api_keys", [])]
+
+
+@router.patch("/api-keys/{key_id}")
+async def update_api_key_scopes(key_id: str, body: ApiKeyUpdate, user: UserContext = Depends(security.require_hr_or_ceo)):
+    result = await mdb.col("users").update_one(
+        {"_id": user.user_id, "api_keys.key_id": key_id},
+        {"$set": {"api_keys.$.scopes": body.scopes}}
+    )
+    if result.matched_count == 0:
+        raise AppError("API key not found")
+    await audit_service.record("api_key_update", user, key_id=key_id, scopes=body.scopes)
+    u = await mdb.col("users").find_one({"_id": user.user_id, "api_keys.key_id": key_id}, {"api_keys": 1})
+    for key in (u or {}).get("api_keys", []):
+        if key.get("key_id") == key_id:
+            return {k: v for k, v in key.items() if k != "hash"}
+    raise AppError("API key not found")
 
 
 @router.delete("/api-keys/{key_id}", status_code=204)
